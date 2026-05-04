@@ -658,7 +658,11 @@ def main() -> None:
     if not seen:
         log.info("First run – seeding existing A1 ads (no notifications)")
         items = fetch_pages(max_pages=0)
-        seen  = {(it.get("link_token") or it.get("id")) for it in items if it.get("id")}
+        for it in items:
+            ad_id = it.get("link_token") or it.get("id")
+            if ad_id:
+                seen.add(ad_id)
+                sync_ad_to_sheet(it)
         save_seen(seen)
         log.info("Seeded %d existing A1 ads", len(seen))
 
