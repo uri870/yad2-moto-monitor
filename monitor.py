@@ -20,11 +20,21 @@ Telegram commands:
     /last [N]            – show N most recent ads matching your filters (default 5)
 
 Optional env vars (in .env):
-    CHECK_INTERVAL   – seconds between Yad2 polls (default: 300)
-    PAGES_TO_CHECK   – pages to scan each poll after seeding (default: 3)
-                       New ads appear first; 0 = always scan all pages.
-    SEEN_ADS_FILE    – ad-ID persistence file (default: seen_ads.json)
-    SUBSCRIBERS_FILE – subscriber+filter file  (default: subscribers.json)
+    CHECK_INTERVAL          – seconds between Yad2 polls (default: 300)
+    PAGES_TO_CHECK          – pages to scan each poll after seeding (default: 3)
+                              New ads appear first; 0 = always scan all pages.
+    SEEN_ADS_FILE           – ad-ID persistence file (default: seen_ads.json)
+    SUBSCRIBERS_FILE        – subscriber+filter file  (default: subscribers.json)
+    GOOGLE_SHEETS_ID        – spreadsheet ID from its URL (optional)
+    GOOGLE_CREDENTIALS_FILE – path to service-account JSON key (optional)
+
+Google Sheets setup (one-time):
+    1. Go to console.cloud.google.com → create a project → enable "Google Sheets API"
+    2. IAM & Admin → Service Accounts → create one → add key (JSON) → download it
+    3. Set GOOGLE_CREDENTIALS_FILE to the downloaded JSON path
+    4. Create a Google Sheet, copy its ID from the URL, set GOOGLE_SHEETS_ID
+    5. Share the sheet with the service account's email (Editor access)
+    The bot will create an "Ads" worksheet and append every new ad automatically.
 """
 
 import json
@@ -45,11 +55,13 @@ load_dotenv()
 # Configuration
 # ---------------------------------------------------------------------------
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHECK_INTERVAL     = int(os.environ.get("CHECK_INTERVAL", "300"))
-PAGES_TO_CHECK     = int(os.environ.get("PAGES_TO_CHECK", "3"))
-SEEN_ADS_FILE      = Path(os.environ.get("SEEN_ADS_FILE", "seen_ads.json"))
-SUBSCRIBERS_FILE   = Path(os.environ.get("SUBSCRIBERS_FILE", "subscribers.json"))
+TELEGRAM_BOT_TOKEN      = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+CHECK_INTERVAL          = int(os.environ.get("CHECK_INTERVAL", "300"))
+PAGES_TO_CHECK          = int(os.environ.get("PAGES_TO_CHECK", "3"))
+SEEN_ADS_FILE           = Path(os.environ.get("SEEN_ADS_FILE", "seen_ads.json"))
+SUBSCRIBERS_FILE        = Path(os.environ.get("SUBSCRIBERS_FILE", "subscribers.json"))
+GOOGLE_SHEETS_ID        = os.environ.get("GOOGLE_SHEETS_ID", "")
+GOOGLE_CREDENTIALS_FILE = os.environ.get("GOOGLE_CREDENTIALS_FILE", "")
 
 # Yad2 API
 YAD2_API      = "https://gw.yad2.co.il/feed-search-legacy/vehicles/motorcycles"
@@ -515,6 +527,81 @@ def build_message(item: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Google Sheets sync (optional – requires GOOGLE_SHEETS_ID + GOOGLE_CREDENTIALS_FILE)
+# ---------------------------------------------------------------------------
+
+SHEET_HEADERS = [
+    "Date Found", "Publish Date", "Ad ID", "Link",
+    "Manufacturer", "Model", "Year",
+    "Price (text)", "Price (₪)", "Engine (cc)",
+    "Hand", "Type", "Area", "License", "Extras",
+]
+
+_sheet = None  # gspread worksheet, lazily initialised
+
+
+def _get_sheet():
+    global _sheet
+    if _sheet is not None:
+        return _sheet
+    if not GOOGLE_SHEETS_ID or not GOOGLE_CREDENTIALS_FILE:
+        return None
+    try:
+        import gspread
+        gc = gspread.service_account(filename=GOOGLE_CREDENTIALS_FILE)
+        spreadsheet = gc.open_by_key(GOOGLE_SHEETS_ID)
+        try:
+            ws = spreadsheet.worksheet("Ads")
+        except gspread.WorksheetNotFound:
+            ws = spreadsheet.add_worksheet("Ads", rows=2000, cols=len(SHEET_HEADERS))
+        if not ws.row_values(1):
+            ws.append_row(SHEET_HEADERS, value_input_option="USER_ENTERED")
+        _sheet = ws
+        log.info("Google Sheets connected: %s", GOOGLE_SHEETS_ID)
+        return _sheet
+    except Exception as e:
+        log.warning("Google Sheets init failed: %s", e)
+        return None
+
+
+def _item_to_row(item: dict) -> list:
+    token     = item.get("link_token") or item.get("id", "")
+    price_str = item.get("price", "")
+    price_num = parse_price(price_str) or ""
+    engine    = item.get("EngineVal_text", "")
+    published = parse_publish_date(item)
+    extras    = "  |  ".join(str(x) for x in item.get("row_5", []) if x)
+    area      = item.get("AreaID_text", "") or item.get("city_text", "")
+    return [
+        date.today().isoformat(),
+        published.isoformat() if published else "",
+        token,
+        f"{YAD2_ITEM_URL}/{token}",
+        item.get("manufacturer", ""),
+        item.get("model", ""),
+        str(item.get("year", "")),
+        price_str,
+        price_num,
+        str(engine) if engine else "",
+        item.get("Hand_text", ""),
+        item.get("MotorcycleTypeID_text", ""),
+        area,
+        item.get("LicID_text", ""),
+        extras,
+    ]
+
+
+def sync_ad_to_sheet(item: dict) -> None:
+    ws = _get_sheet()
+    if ws is None:
+        return
+    try:
+        ws.append_row(_item_to_row(item), value_input_option="USER_ENTERED")
+    except Exception as e:
+        log.warning("Sheet append failed for ad %s: %s", item.get("id"), e)
+
+
+# ---------------------------------------------------------------------------
 # Core check
 # ---------------------------------------------------------------------------
 
@@ -533,6 +620,7 @@ def check_new_ads(
         if not ad_id or ad_id in seen:
             continue
         seen.add(ad_id)
+        sync_ad_to_sheet(item)
         if not subscribers:
             continue
         notified = broadcast(item, subscribers)
