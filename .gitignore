@@ -1,0 +1,4 @@
+.env
+seen_ads.json
+__pycache__/
+*.pyc
