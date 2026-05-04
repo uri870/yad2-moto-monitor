@@ -601,6 +601,19 @@ def sync_ad_to_sheet(item: dict) -> None:
         log.warning("Sheet append failed for ad %s: %s", item.get("id"), e)
 
 
+def sync_ads_to_sheet_bulk(items: list[dict]) -> None:
+    """Append many ads in a single API call to avoid rate limits."""
+    ws = _get_sheet()
+    if ws is None or not items:
+        return
+    try:
+        rows = [_item_to_row(it) for it in items]
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+        log.info("Synced %d ads to sheet in bulk", len(rows))
+    except Exception as e:
+        log.warning("Sheet bulk append failed: %s", e)
+
+
 # ---------------------------------------------------------------------------
 # Core check
 # ---------------------------------------------------------------------------
@@ -658,11 +671,10 @@ def main() -> None:
     if not seen:
         log.info("First run – seeding existing A1 ads (no notifications)")
         items = fetch_pages(max_pages=0)
-        for it in items:
-            ad_id = it.get("link_token") or it.get("id")
-            if ad_id:
-                seen.add(ad_id)
-                sync_ad_to_sheet(it)
+        valid = [it for it in items if it.get("link_token") or it.get("id")]
+        for it in valid:
+            seen.add(it.get("link_token") or it.get("id"))
+        sync_ads_to_sheet_bulk(valid)
         save_seen(seen)
         log.info("Seeded %d existing A1 ads", len(seen))
 
