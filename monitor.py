@@ -399,12 +399,18 @@ def fetch_page(page: int) -> tuple[list[dict], int]:
     try:
         r = requests.get(YAD2_API, headers=YAD2_HEADERS, params=params, timeout=20)
         r.raise_for_status()
+        if not r.text.strip():
+            log.error("Empty response from Yad2 (page %d) – IP may be blocked", page)
+            return [], 0
+        if r.text.strip().startswith("<"):
+            log.error("HTML response from Yad2 (page %d) – CAPTCHA or block: %s", page, r.text[:200])
+            return [], 0
         body = r.json()
     except requests.RequestException as e:
         log.error("API request failed (page %d): %s", page, e)
         return [], 0
     except ValueError as e:
-        log.error("JSON parse failed (page %d): %s", page, e)
+        log.error("JSON parse failed (page %d): %s | body: %s", page, e, r.text[:200])
         return [], 0
 
     data      = body.get("data", {})
